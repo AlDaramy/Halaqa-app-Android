@@ -1,4 +1,4 @@
-name: Build Android app
+name: Build Android app and publish web version
 
 on:
   push:
@@ -6,8 +6,34 @@ on:
   workflow_dispatch:
 
 jobs:
+  pages:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Arrange files into folders
+        run: |
+          mkdir -p www/icons assets
+          for f in index.html manifest.webmanifest sw.js; do if [ -f "$f" ]; then mv "$f" www/; fi; done
+          for f in apple-touch-icon.png icon-192.png icon-512.png; do if [ -f "$f" ]; then mv "$f" www/icons/; fi; done
+          for f in icon-only.png icon-foreground.png icon-background.png splash.png splash-dark.png; do if [ -f "$f" ]; then mv "$f" assets/; fi; done
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: www
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
   android:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Arrange files into folders
@@ -23,8 +49,20 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Compute version (major.minor from package.json + build number)
+        run: |
+          BASE=$(node -p "require('./package.json').version.split('.').slice(0,2).join('.')")
+          echo "VER=$BASE.${{ github.run_number }}" >> "$GITHUB_ENV"
       - run: npm install
+      - name: Point the app to the live web version (auto-updates)
+        run: |
+          OWNER=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')
+          REPO="${GITHUB_REPOSITORY#*/}"
+          node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('capacitor.config.json'));c.server={url:'https://$OWNER.github.io/$REPO/',androidScheme:'https',cleartext:false};fs.writeFileSync('capacitor.config.json',JSON.stringify(c,null,2))"
+          cat capacitor.config.json
       - run: npx cap add android
+      - name: Set app version
+        run: sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/; s/versionName \"1.0\"/versionName \"$VER\"/" android/app/build.gradle
       - name: Generate icons and splash
         continue-on-error: true
         run: npx capacitor-assets generate --android --iconBackgroundColor '#1d5c47' --splashBackgroundColor '#1d5c47'
@@ -34,7 +72,10 @@ jobs:
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug
-      - uses: actions/upload-artifact@v4
+      - name: Name the APK
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk "Halaqa-Android-$VER.apk"
+      - uses: softprops/action-gh-release@v2
         with:
-          name: Halaqa-Android
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          tag_name: v${{ env.VER }}
+          name: الإصدار ${{ env.VER }}
+          files: Halaqa-Android-${{ env.VER }}.apk
